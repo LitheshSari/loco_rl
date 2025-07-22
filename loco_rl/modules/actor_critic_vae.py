@@ -5,29 +5,32 @@ import torch.nn as nn
 from torch.distributions import Normal
 from loco_rl.utils import resolve_nn_activation
 
+
 class ActorCriticVae(nn.Module):
     is_recurrent = False
-    def __init__(self, 
-                 num_actor_obs, 
-                 num_privileged_obs, 
-                 num_actions, 
-                 num_latent, 
-                 actor_hidden_dims = [512, 256, 128],
-                 critic_hidden_dims = [512, 256, 128],
-                 decoder_hidden_dims = [512, 256, 128],
-                 activation="elu", 
-                 init_noise_std=1.0,
-                 num_history = 5,
-                 noise_std_type: str = "scalar",
-                    **kwargs
-                 ):
+
+    def __init__(
+        self,
+        num_actor_obs,
+        num_privileged_obs,
+        num_actions,
+        num_latent,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        decoder_hidden_dims=[512, 256, 128],
+        activation="elu",
+        init_noise_std=1.0,
+        num_history=5,
+        noise_std_type: str = "scalar",
+        **kwargs,
+    ):
         super().__init__()
 
         self.num_history = num_history
         activation = resolve_nn_activation(activation)
 
         # Actor Shape : num_obs + context_latent_z + context_latent_linear_vel
-        actor_input_dim = num_actor_obs + num_latent + 3 
+        actor_input_dim = num_actor_obs + num_latent + 3
         critic_input_dim = num_privileged_obs
         decoder_output_dim = num_actor_obs
         context_latent_dim = num_latent + 3  # latent_z + linear_vel
@@ -38,9 +41,16 @@ class ActorCriticVae(nn.Module):
         actor_layers.append(activation)
         for layer_index in range(len(actor_hidden_dims)):
             if layer_index == len(actor_hidden_dims) - 1:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], num_actions))
+                actor_layers.append(
+                    nn.Linear(actor_hidden_dims[layer_index], num_actions)
+                )
             else:
-                actor_layers.append(nn.Linear(actor_hidden_dims[layer_index], actor_hidden_dims[layer_index + 1]))
+                actor_layers.append(
+                    nn.Linear(
+                        actor_hidden_dims[layer_index],
+                        actor_hidden_dims[layer_index + 1],
+                    )
+                )
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
@@ -52,15 +62,20 @@ class ActorCriticVae(nn.Module):
             if layer_index == len(critic_hidden_dims) - 1:
                 critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], 1))
             else:
-                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], critic_hidden_dims[layer_index + 1]))
+                critic_layers.append(
+                    nn.Linear(
+                        critic_hidden_dims[layer_index],
+                        critic_hidden_dims[layer_index + 1],
+                    )
+                )
                 critic_layers.append(activation)
         self.critic = nn.Sequential(*critic_layers)
 
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Linear(num_history*num_actor_obs,128),
+            nn.Linear(num_history * num_actor_obs, 128),
             activation,
-            nn.Linear(128,64),
+            nn.Linear(128, 64),
             activation,
         )
         self.encode_mean_latent = nn.Linear(64, num_latent)
@@ -74,9 +89,16 @@ class ActorCriticVae(nn.Module):
         decoder_layers.append(activation)
         for layer_index in range(len(decoder_hidden_dims)):
             if layer_index == len(decoder_hidden_dims) - 1:
-                decoder_layers.append(nn.Linear(decoder_hidden_dims[layer_index], decoder_output_dim))
+                decoder_layers.append(
+                    nn.Linear(decoder_hidden_dims[layer_index], decoder_output_dim)
+                )
             else:
-                decoder_layers.append(nn.Linear(decoder_hidden_dims[layer_index], decoder_hidden_dims[layer_index + 1]))
+                decoder_layers.append(
+                    nn.Linear(
+                        decoder_hidden_dims[layer_index],
+                        decoder_hidden_dims[layer_index + 1],
+                    )
+                )
                 decoder_layers.append(activation)
         self.decoder = nn.Sequential(*decoder_layers)
 
@@ -98,7 +120,9 @@ class ActorCriticVae(nn.Module):
     def init_weights(sequential, scales):
         [
             torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
-            for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
+            for idx, module in enumerate(
+                mod for mod in sequential if isinstance(mod, nn.Linear)
+            )
         ]
 
     def reset(self, dones=None):
@@ -106,25 +130,27 @@ class ActorCriticVae(nn.Module):
 
     def forward(self):
         raise NotImplementedError
-    
+
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
-    
+
     def cenet_forward(self, obs_history):
-        obs_history = obs_history.reshape(obs_history.shape[0], -1)  # (bz, T, obs_dim) -> (bz, T * obs_dim)
+        obs_history = obs_history.reshape(
+            obs_history.shape[0], -1
+        )  # (bz, T, obs_dim) -> (bz, T * obs_dim)
         distribution = self.encoder(obs_history)
         mean_latent = self.encode_mean_latent(distribution)
         logvar_latent = self.encode_logvar_latent(distribution)
 
         mean_vel = self.encode_mean_vel(distribution)
         logvar_vel = self.encode_mean_vel(distribution)
-        code_latent = self.reparameterize(mean_latent,logvar_latent)
-        code_vel = self.reparameterize(mean_vel,logvar_vel)
-        code = torch.cat((code_vel,code_latent),dim=-1)
+        code_latent = self.reparameterize(mean_latent, logvar_latent)
+        code_vel = self.reparameterize(mean_vel, logvar_vel)
+        code = torch.cat((code_vel, code_latent), dim=-1)
         decode = self.decoder(code)
-        return code,code_vel,decode,mean_vel,logvar_vel,mean_latent,logvar_latent
+        return code, code_vel, decode, mean_vel, logvar_vel, mean_latent, logvar_latent
 
     @property
     def action_mean(self):
@@ -143,8 +169,8 @@ class ActorCriticVae(nn.Module):
         self.distribution = Normal(mean, self.std)
 
     def act(self, observations, obs_history, **kwargs):
-        code,_,decode,_,_,_,_ = self.cenet_forward(obs_history)
-        observations = torch.cat((code,observations), dim=-1)
+        code, _, decode, _, _, _, _ = self.cenet_forward(obs_history)
+        observations = torch.cat((code, observations), dim=-1)
         self.update_distribution(observations)
         return self.distribution.sample()
 
@@ -152,7 +178,7 @@ class ActorCriticVae(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, obs_history):
-        code,_,decode,_,_,_,_ = self.cenet_forward(obs_history)
+        code, _, decode, _, _, _, _ = self.cenet_forward(obs_history)
         observations = obs_history[:, -1, :]
         observations = torch.cat((code, observations), dim=-1)
         actions_mean = self.actor(observations)

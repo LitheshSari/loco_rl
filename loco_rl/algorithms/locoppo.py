@@ -9,10 +9,11 @@ from loco_rl.modules.actor_critic_vae import ActorCriticVae
 from loco_rl.modules.rnd import RandomNetworkDistillation
 from loco_rl.storage import RolloutStorageVae as RolloutStorage
 
+
 class LocoPPO:
     def __init__(
         self,
-        policy:ActorCriticVae,
+        policy: ActorCriticVae,
         num_learning_epochs=1,
         num_mini_batches=1,
         clip_param=0.2,
@@ -36,8 +37,8 @@ class LocoPPO:
         # VAE parameters
         kl_weight=1.0,
         vae_learning_rate=1e-3,
-        num_adaptation_module_substeps=1
-        ):
+        num_adaptation_module_substeps=1,
+    ):
         self.device = device
 
         # RND components
@@ -80,13 +81,25 @@ class LocoPPO:
 
         self.transition = RolloutStorage.Transition()
 
-
     def init_storage(
-        self, training_type, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, actions_shape
+        self,
+        training_type,
+        num_envs,
+        num_transitions_per_env,
+        actor_obs_shape,
+        critic_obs_shape,
+        actions_shape,
     ):
         obs_history_shape = [self.policy.num_history, *actor_obs_shape]
-        self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape,
-                                      obs_history_shape, actions_shape, self.device)
+        self.storage = RolloutStorage(
+            num_envs,
+            num_transitions_per_env,
+            actor_obs_shape,
+            critic_obs_shape,
+            obs_history_shape,
+            actions_shape,
+            self.device,
+        )
 
     def test_mode(self):
         self.policy.eval()
@@ -98,17 +111,21 @@ class LocoPPO:
         # Compute the actions and values
         obs = obs_history[:, -1, :]
         # TODO: 这里需要考虑 obs_history 的 shape, 并且这是一个硬编码，和 obs_term 顺序有关
-        base_vel = privileged_obs[:, :3]  # Assuming the first 3 dimensions are the base velocity
+        base_vel = privileged_obs[
+            :, :3
+        ]  # Assuming the first 3 dimensions are the base velocity
         self.transition.actions = self.policy.act(obs, obs_history).detach()
         self.transition.values = self.policy.evaluate(privileged_obs).detach()
-        self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
+        self.transition.actions_log_prob = self.policy.get_actions_log_prob(
+            self.transition.actions
+        ).detach()
         self.transition.action_mean = self.policy.action_mean.detach()
         self.transition.action_sigma = self.policy.action_std.detach()
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.observation_histories = obs_history
         self.transition.privileged_observations = privileged_obs
-        self.transition.base_vel = base_vel 
+        self.transition.base_vel = base_vel
         return self.transition.actions
 
     def process_env_step(self, rewards, dones, infos):
@@ -118,15 +135,16 @@ class LocoPPO:
         # Prepare next observations: if done, use current obs; else, use next_obs from infos
         next_obs = infos["observations"]["next_obs"][:, -1, :].detach()
         self.transition.next_observations = torch.where(
-            dones.unsqueeze(-1).bool(), 
-            self.transition.observations.clone(), 
-            next_obs
+            dones.unsqueeze(-1).bool(), self.transition.observations.clone(), next_obs
         )
 
         # Bootstrapping on time outs
-        if 'time_outs' in infos:
+        if "time_outs" in infos:
             self.transition.rewards += self.gamma * torch.squeeze(
-                self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+                self.transition.values
+                * infos["time_outs"].unsqueeze(1).to(self.device),
+                1,
+            )
 
         # Record the transition
         self.storage.add_transitions(self.transition)
@@ -144,13 +162,26 @@ class LocoPPO:
         mean_recons_loss = 0
         mean_vel_loss = 0
         mean_kld_loss = 0
-        
-        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, privileged_obs_batch, obs_history_batch, actions_batch,\
-            target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, base_vel_batch, dones_batch, next_obs_batch in generator:
 
-            #! Training  Student, encoder 是同时需要 RL 和 VAE  
+        generator = self.storage.mini_batch_generator(
+            self.num_mini_batches, self.num_learning_epochs
+        )
+        for (
+            obs_batch,
+            privileged_obs_batch,
+            obs_history_batch,
+            actions_batch,
+            target_values_batch,
+            advantages_batch,
+            returns_batch,
+            old_actions_log_prob_batch,
+            old_mu_batch,
+            old_sigma_batch,
+            base_vel_batch,
+            dones_batch,
+            next_obs_batch,
+        ) in generator:
+            #! Training  Student, encoder 是同时需要 RL 和 VAE
             self.policy.act(obs_batch, obs_history_batch)
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(privileged_obs_batch)
@@ -159,12 +190,18 @@ class LocoPPO:
             entropy_batch = self.policy.entropy
 
             # KL
-            if self.desired_kl != None and self.schedule == 'adaptive':
+            if self.desired_kl != None and self.schedule == "adaptive":
                 with torch.inference_mode():
                     kl = torch.sum(
-                        torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (
-                                torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (
-                                2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
+                        torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
+                        + (
+                            torch.square(old_sigma_batch)
+                            + torch.square(old_mu_batch - mu_batch)
+                        )
+                        / (2.0 * torch.square(sigma_batch))
+                        - 0.5,
+                        axis=-1,
+                    )
                     kl_mean = torch.mean(kl)
 
                     if kl_mean > self.desired_kl * 2.0:
@@ -173,14 +210,24 @@ class LocoPPO:
                         self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
                     for param_group in self.optimizer.param_groups:
-                        param_group['lr'] = self.learning_rate
-                
+                        param_group["lr"] = self.learning_rate
+
             # Beta-VAE loss
-            code,code_vel,recon_est,mean_vel,logvar_vel,mean_latent,logvar_latent = self.policy.cenet_forward(obs_history_batch)
-            
-            recons_loss =  nn.MSELoss()(recon_est, next_obs_batch)
+            (
+                code,
+                code_vel,
+                recon_est,
+                mean_vel,
+                logvar_vel,
+                mean_latent,
+                logvar_latent,
+            ) = self.policy.cenet_forward(obs_history_batch)
+
+            recons_loss = nn.MSELoss()(recon_est, next_obs_batch)
             vel_loss = nn.MSELoss()(code_vel, base_vel_batch)
-            kld_loss = -0.5 * torch.sum(1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp())
+            kld_loss = -0.5 * torch.sum(
+                1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()
+            )
             mean_recons_loss += recons_loss.item()
             mean_vel_loss += vel_loss.item()
             mean_kld_loss += kld_loss.item()
@@ -188,24 +235,32 @@ class LocoPPO:
             autoenc_loss = recons_loss + vel_loss + self.kl_weight * kld_loss
 
             # Surrogate loss
-            ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+            ratio = torch.exp(
+                actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
+            )
             surrogate = -torch.squeeze(advantages_batch) * ratio
-            surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
-                                                                               1.0 + self.clip_param)
+            surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
+                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+            )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
             # Value function loss
             if self.use_clipped_value_loss:
-                value_clipped = target_values_batch + \
-                                (value_batch - target_values_batch).clamp(-self.clip_param,
-                                                                          self.clip_param)
+                value_clipped = target_values_batch + (
+                    value_batch - target_values_batch
+                ).clamp(-self.clip_param, self.clip_param)
                 value_losses = (value_batch - returns_batch).pow(2)
                 value_losses_clipped = (value_clipped - returns_batch).pow(2)
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + autoenc_loss
+            loss = (
+                surrogate_loss
+                + self.value_loss_coef * value_loss
+                - self.entropy_coef * entropy_batch.mean()
+                + autoenc_loss
+            )
 
             # Gradient step
             self.optimizer.zero_grad()
@@ -221,10 +276,10 @@ class LocoPPO:
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_entropy_loss /= num_updates
-        mean_recons_loss /= (num_updates * self.num_adaptation_module_substeps)
-        mean_vel_loss /= (num_updates * self.num_adaptation_module_substeps)
-        mean_kld_loss /= (num_updates * self.num_adaptation_module_substeps)
-      
+        mean_recons_loss /= num_updates * self.num_adaptation_module_substeps
+        mean_vel_loss /= num_updates * self.num_adaptation_module_substeps
+        mean_kld_loss /= num_updates * self.num_adaptation_module_substeps
+
         self.storage.clear()
 
         # construct the loss dictionary
