@@ -263,16 +263,16 @@ class LocoPPO:
             self.optimizer.zero_grad()
             loss.backward()
             
-            # Check for NaN gradients before clipping
-            total_norm = 0.0
-            for p in self.policy.parameters():
-                if p.grad is not None:
-                    if torch.any(torch.isnan(p.grad)) or torch.any(torch.isinf(p.grad)):
-                        print("Warning: NaN or Inf gradients detected, skipping update")
-                        continue
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** (1. / 2)
+            # # Check for NaN gradients before clipping
+            # total_norm = 0.0
+            # for p in self.policy.parameters():
+            #     if p.grad is not None:
+            #         if torch.any(torch.isnan(p.grad)) or torch.any(torch.isinf(p.grad)):
+            #             print("Warning: NaN or Inf gradients detected, skipping update")
+            #             continue
+            #         param_norm = p.grad.data.norm(2)
+            #         total_norm += param_norm.item() ** 2
+            # total_norm = total_norm ** (1. / 2)
             
             nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.optimizer.step()

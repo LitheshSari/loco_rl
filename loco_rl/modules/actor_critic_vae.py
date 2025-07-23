@@ -136,7 +136,7 @@ class ActorCriticVae(nn.Module):
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         # Clamp logvar to prevent numerical instability
-        logvar = torch.clamp(logvar, min=-20.0, max=2.0)
+        logvar = torch.clamp(logvar, min=-20.0, max=4.0)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
@@ -177,9 +177,8 @@ class ActorCriticVae(nn.Module):
         recons_loss = F.mse_loss(recons, next_obs, reduction='none').mean(-1)
         # Supervised loss
         vel_loss = F.mse_loss(vel_mu, vel, reduction='none').mean(-1)
-        # Clamp latent_var to prevent numerical instability in KLD calculation
-        latent_var_clamped = torch.clamp(latent_var, min=-20.0, max=2.0)
-        kld_loss = -0.5 * torch.sum(1 + latent_var_clamped - latent_mu ** 2 - latent_var_clamped.exp(), dim=1)
+        #  kld loss
+        kld_loss = -0.5 * torch.sum(1 + latent_var - latent_mu ** 2 - latent_var.exp(), dim=1)
         
         # Check for NaN in reconstruction loss
         if torch.any(torch.isnan(recons_loss)):
@@ -205,14 +204,6 @@ class ActorCriticVae(nn.Module):
 
     def update_distribution(self, observations):
         mean = self.actor(observations)
-        
-        # Check for NaN values and clamp to prevent numerical issues
-        if torch.any(torch.isnan(mean)):
-            print("Warning: NaN detected in actor output, replacing with zeros")
-            mean = torch.where(torch.isnan(mean), torch.zeros_like(mean), mean)
-        # Clamp mean to reasonable range to prevent extreme values
-        mean = torch.clamp(mean, min=-10.0, max=10.0)
-
         self.distribution = Normal(mean, self.std)
 
     def act(self, observations, obs_history, **kwargs):
