@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Normal
 from loco_rl.utils import resolve_nn_activation
 
@@ -73,9 +74,11 @@ class ActorCriticVae(nn.Module):
 
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Linear(num_history * num_actor_obs, 128),
+            nn.Linear(num_history * num_actor_obs, 512),
             activation,
-            nn.Linear(128, 64),
+            nn.Linear(512, 256),
+            activation,
+            nn.Linear(256, 64),
             activation,
         )
         self.encode_mean_latent = nn.Linear(64, num_latent)
@@ -132,6 +135,8 @@ class ActorCriticVae(nn.Module):
         raise NotImplementedError
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        # Clamp logvar to prevent numerical instability
+        logvar = torch.clamp(logvar, min=-20.0, max=2.0)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
@@ -141,11 +146,12 @@ class ActorCriticVae(nn.Module):
             obs_history.shape[0], -1
         )  # (bz, T, obs_dim) -> (bz, T * obs_dim)
         distribution = self.encoder(obs_history)
+        
         mean_latent = self.encode_mean_latent(distribution)
         logvar_latent = self.encode_logvar_latent(distribution)
-
         mean_vel = self.encode_mean_vel(distribution)
-        logvar_vel = self.encode_mean_vel(distribution)
+        logvar_vel = self.encode_logvar_vel(distribution)
+
         code_latent = self.reparameterize(mean_latent, logvar_latent)
         code_vel = self.reparameterize(mean_vel, logvar_vel)
         code = torch.cat((code_vel, code_latent), dim=-1)
@@ -163,13 +169,55 @@ class ActorCriticVae(nn.Module):
     @property
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
+    
+    def vae_loss_fn(self, obs_history, next_obs, vel, kld_weight=1.0):
+        code, _, recons, vel_mu, _, latent_mu, latent_var = self.cenet_forward(obs_history)
+
+        # Reconstruction loss
+        recons_loss = F.mse_loss(recons, next_obs, reduction='none').mean(-1)
+        # Supervised loss
+        vel_loss = F.mse_loss(vel_mu, vel, reduction='none').mean(-1)
+        # Clamp latent_var to prevent numerical instability in KLD calculation
+        latent_var_clamped = torch.clamp(latent_var, min=-20.0, max=2.0)
+        kld_loss = -0.5 * torch.sum(1 + latent_var_clamped - latent_mu ** 2 - latent_var_clamped.exp(), dim=1)
+        
+        # Check for NaN in reconstruction loss
+        if torch.any(torch.isnan(recons_loss)):
+            print("Warning: NaN detected in recons_loss")
+            recons_loss = torch.where(torch.isnan(recons_loss), torch.zeros_like(recons_loss), recons_loss)
+        # Check for NaN in velocity loss
+        if torch.any(torch.isnan(vel_loss)):
+            print("Warning: NaN detected in vel_loss")
+            vel_loss = torch.where(torch.isnan(vel_loss), torch.zeros_like(vel_loss), vel_loss)
+        # Check for NaN in KLD loss
+        if torch.any(torch.isnan(kld_loss)):
+            print("Warning: NaN detected in kld_loss")
+            kld_loss = torch.where(torch.isnan(kld_loss), torch.zeros_like(kld_loss), kld_loss)
+
+        loss = recons_loss + vel_loss + kld_weight * kld_loss
+        
+        return {
+            'loss': loss,
+            'recons_loss': recons_loss,
+            'vel_loss': vel_loss,
+            'kld_loss': kld_loss,
+        }
 
     def update_distribution(self, observations):
         mean = self.actor(observations)
+        
+        # Check for NaN values and clamp to prevent numerical issues
+        if torch.any(torch.isnan(mean)):
+            print("Warning: NaN detected in actor output, replacing with zeros")
+            mean = torch.where(torch.isnan(mean), torch.zeros_like(mean), mean)
+        # Clamp mean to reasonable range to prevent extreme values
+        mean = torch.clamp(mean, min=-10.0, max=10.0)
+
         self.distribution = Normal(mean, self.std)
 
     def act(self, observations, obs_history, **kwargs):
-        code, _, decode, _, _, _, _ = self.cenet_forward(obs_history)
+        with torch.no_grad():
+            code, _, decode, _, _, _, _ = self.cenet_forward(obs_history)
         observations = torch.cat((code, observations), dim=-1)
         self.update_distribution(observations)
         return self.distribution.sample()

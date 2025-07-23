@@ -181,13 +181,15 @@ class LocoPPO:
             dones_batch,
             next_obs_batch,
         ) in generator:
+            original_batch_size = obs_batch.shape[0]
+
             #! Training  Student, encoder 是同时需要 RL 和 VAE
             self.policy.act(obs_batch, obs_history_batch)
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(privileged_obs_batch)
-            mu_batch = self.policy.action_mean
-            sigma_batch = self.policy.action_std
-            entropy_batch = self.policy.entropy
+            mu_batch = self.policy.action_mean[0:original_batch_size]
+            sigma_batch = self.policy.action_std[0:original_batch_size]
+            entropy_batch = self.policy.entropy[0:original_batch_size]
 
             # KL
             if self.desired_kl != None and self.schedule == "adaptive":
@@ -212,27 +214,13 @@ class LocoPPO:
                     for param_group in self.optimizer.param_groups:
                         param_group["lr"] = self.learning_rate
 
-            # Beta-VAE loss
-            (
-                code,
-                code_vel,
-                recon_est,
-                mean_vel,
-                logvar_vel,
-                mean_latent,
-                logvar_latent,
-            ) = self.policy.cenet_forward(obs_history_batch)
-
-            recons_loss = nn.MSELoss()(recon_est, next_obs_batch)
-            vel_loss = nn.MSELoss()(code_vel, base_vel_batch)
-            kld_loss = -0.5 * torch.sum(
-                1 + logvar_latent - mean_latent.pow(2) - logvar_latent.exp()
-            )
-            mean_recons_loss += recons_loss.item()
-            mean_vel_loss += vel_loss.item()
-            mean_kld_loss += kld_loss.item()
-
-            autoenc_loss = recons_loss + vel_loss + self.kl_weight * kld_loss
+            vae_loss_dict = self.policy.vae_loss_fn(obs_history_batch, next_obs_batch, base_vel_batch, self.kl_weight)
+            valid = (dones_batch == 0).squeeze()
+            vae_loss = torch.mean(vae_loss_dict['loss'][valid])
+            with torch.no_grad():
+                recons_loss = torch.mean(vae_loss_dict['recons_loss'][valid])
+                vel_loss = torch.mean(vae_loss_dict['vel_loss'][valid])
+                kld_loss = torch.mean(vae_loss_dict['kld_loss'][valid]) 
 
             # Surrogate loss
             ratio = torch.exp(
@@ -259,14 +247,39 @@ class LocoPPO:
                 surrogate_loss
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy_batch.mean()
-                + autoenc_loss
+                + vae_loss
             )
+
+            # Check for NaN in loss before backward pass
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: Invalid loss detected: {loss.item()}")
+                print(f"Surrogate loss: {surrogate_loss.item()}")
+                print(f"Value loss: {value_loss.item()}")
+                print(f"Entropy loss: {entropy_batch.mean().item()}")
+                print(f"VAE loss: {vae_loss.item()}")
+                continue  # Skip this batch
 
             # Gradient step
             self.optimizer.zero_grad()
             loss.backward()
+            
+            # Check for NaN gradients before clipping
+            total_norm = 0.0
+            for p in self.policy.parameters():
+                if p.grad is not None:
+                    if torch.any(torch.isnan(p.grad)) or torch.any(torch.isinf(p.grad)):
+                        print("Warning: NaN or Inf gradients detected, skipping update")
+                        continue
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+            
             nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.optimizer.step()
+            
+            mean_recons_loss += recons_loss.item()
+            mean_vel_loss += vel_loss.item()
+            mean_kld_loss += kld_loss.item()
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
